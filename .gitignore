@@ -46,3 +46,13 @@ dist/
 *.csv
 # (注意：如果你有重要的 config.json 或 data.csv 需要上传，就不要写上面这两行)
 
+# --------- Vim/gVim 产生的临时文件 ---------
+# 忽略备份文件 (以 ~ 结尾，如 .gitignore~)
+*~
+
+# 忽略 Swap 交换文件 (用于恢复崩溃的编辑)
+*.swp
+*.swo
+
+# 忽略 Undo 撤销文件 (如 ..gitignore.un~)
+*.un~
