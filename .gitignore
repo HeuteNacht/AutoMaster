@@ -56,3 +56,12 @@ dist/
 
 # 忽略 Undo 撤销文件 (如 ..gitignore.un~)
 *.un~
+
+# PyInstaller 生成的文件
+*.spec
+
+# 打包过程中生成的临时文件夹 (里面全是临时文件)
+build/
+
+# 打包结果文件夹 (里面是 .exe 文件，体积巨大，千万别传)
+dist/
