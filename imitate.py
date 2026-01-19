@@ -3,14 +3,17 @@ import time
 import os
 import random
 import traceback
+import pyperclip  # 【新增】导入剪贴板库
 from pynput import keyboard
-import tkinter.messagebox # 【新增】用于弹窗
+import tkinter.messagebox 
 import utils
 import config
 
+# === 保持原有的辅助函数不变 ===
+
 def wait_for_stationary_start():
     """
-    【新增】等待鼠标在某处静止 3 秒，作为截图的起始点（左上角）
+    等待鼠标在某处静止 3 秒，作为截图的起始点（左上角）
     """
     utils.log("👉 请将鼠标移至目标【左上角】并静止 3秒...", "cyan")
     
@@ -26,7 +29,6 @@ def wait_for_stationary_start():
         if dist > 5: # 5像素容差
             stable_start_time = time.time()
             last_pos = curr_pos
-            # 只有当时间被重置时才更新UI，避免闪烁，但要保持提示
             if time.time() % 1.0 < 0.1: 
                 utils.log("👉 请移至左上角 -> 静止 3秒", "cyan")
         
@@ -35,18 +37,15 @@ def wait_for_stationary_start():
         remaining = 3.0 - elapsed
         
         if remaining <= 0:
-            # 静止时间达标
             return last_pos
         
         time.sleep(0.1)
 
 def track_gesture_update(start_pos):
     """
-    【修改】基于确定的起点，等待用户划动并静止以确认终点
+    基于确定的起点，等待用户划动并静止以确认终点
     """
     utils.log("🟢 起点已锁定！请向右下划动框选...", "#00FF00")
-    # 播放提示音 (可选)
-    # print('\a')
     
     path = [start_pos]
     moving = False
@@ -65,16 +64,13 @@ def track_gesture_update(start_pos):
             # 检测是否在终点停住了 (静止 2秒 确认)
             if utils.get_dist(curr, last_pos) < config.JITTER_TOLERANCE:
                 if time.time() - last_pos_time > 2.0:
-                    # 确认框选结束
                     xs, ys = [p[0] for p in path], [p[1] for p in path]
                     w, h = max(xs) - min(xs), max(ys) - min(ys)
                     return (min(xs), min(ys), w, h)
             else:
-                # 还在移动，更新最后位置的时间
                 last_pos_time = time.time()
                 last_pos = curr
                 
-            # 实时显示当前大小
             curr_w = abs(curr[0] - start_pos[0])
             curr_h = abs(curr[1] - start_pos[1])
             utils.log(f"📐 当前区域: {curr_w}x{curr_h}", "yellow")
@@ -88,8 +84,7 @@ def smart_locate(img_path):
     start = time.time()
     attempt = 1
     
-    # === 阶段一：初始自动重试 (避让鼠标) ===
-    # 稍微减少这里的重试时间，因为后面有人工介入
+    # === 阶段一：初始自动重试 ===
     while time.time() - start < 3.0: 
         utils.check_stop()
         try:
@@ -109,18 +104,14 @@ def smart_locate(img_path):
         utils.log("⏳ 请在 3秒 内帮我去除障碍物...", "magenta")
         time.sleep(3)
         
-        # 弹窗询问 (使用 utils.hud_instance.root 作为父窗口，避免弹窗在后面)
-        # 注意：askyesno 会阻塞线程，这正是我们需要的
         is_cleared = tkinter.messagebox.askyesno(
             "AutoMaster 助手", 
             "是否移除障碍物完毕？", 
             parent=utils.hud_instance.root
         )
         
-        if is_cleared: # 用户选“是”
+        if is_cleared: 
             utils.log("🔄 正在重新搜索图片...", "white")
-            
-            # 再次尝试查找 2 次
             for i in range(2):
                 utils.check_stop()
                 try:
@@ -130,30 +121,21 @@ def smart_locate(img_path):
                         return loc
                 except: pass
                 time.sleep(1)
-            
-            # 如果找了2次还是没找到，跳出循环，进入阶段三（更新截图）
             break 
-            
-        else: # 用户选“否”
-            # 继续循环提示去除障碍物
+        else: 
             continue
 
-    # === 阶段三：手势更新截图 (防误触版) ===
+    # === 阶段三：手势更新截图 ===
     utils.log("❌ 仍未找到。请告知更新范围...", "red")
     time.sleep(1.5)
     
-    # 1. 等待用户在左上角静止 3秒
     start_pos = wait_for_stationary_start()
-    
-    # 2. 开始划动轨迹
     rect = track_gesture_update(start_pos)
     ux, uy, uw, uh = rect
     
-    # 3. 校验尺寸
     if uw < 10: uw = 10
     if uh < 10: uh = 10
     
-    # 4. 执行修复
     utils.log("💾 正在更新图片...", "yellow")
     pyautogui.screenshot(region=(ux, uy, uw, uh)).save(img_path)
     utils.log("✅ 图片已修复，继续执行", "#00FF00")
@@ -177,6 +159,71 @@ def execute_playback(filepath):
         action = parts[0]
         
         try:
+            # === 【新增】Paste 指令逻辑 ===
+            if action == "Paste":
+                # 格式: Paste,x,y,filename,line_index
+                if len(parts) < 5:
+                    utils.log(f"⚠️ Paste 格式错误: {line}", "red")
+                    continue
+                    
+                tx, ty = int(parts[1]), int(parts[2])
+                data_file = parts[3]
+                try:
+                    line_idx = int(parts[4])
+                except ValueError:
+                    utils.log(f"⚠️ 行号必须是数字: {parts[4]}", "red")
+                    continue
+                
+                # 1. 寻找文件 (支持相对路径)
+                target_file_path = data_file
+                if not os.path.isabs(data_file):
+                    # 优先在 scripts 文件夹找
+                    p1 = os.path.join(config.SCRIPTS_DIR, data_file)
+                    if os.path.exists(p1): target_file_path = p1
+                    else:
+                        # 其次在根目录找
+                        p2 = os.path.join(config.BASE_DIR, data_file)
+                        if os.path.exists(p2): target_file_path = p2
+                
+                if not os.path.exists(target_file_path):
+                    utils.log(f"❌ 未找到数据文件: {data_file}", "red")
+                    continue
+                
+                # 2. 读取指定行
+                content_to_paste = ""
+                try:
+                    with open(target_file_path, 'r', encoding='utf-8') as df:
+                        d_lines = df.readlines()
+                        # line_idx 从 1 开始
+                        if 1 <= line_idx <= len(d_lines):
+                            content_to_paste = d_lines[line_idx - 1].strip()
+                        else:
+                            utils.log(f"⚠️ 行号越界: {line_idx} (总行数:{len(d_lines)})", "orange")
+                            continue
+                except Exception as e:
+                    utils.log(f"❌ 读文件失败: {e}", "red")
+                    continue
+                
+                # 3. 执行操作：点击 -> 复制 -> 粘贴
+                utils.log(f"📋 粘贴第{line_idx}行...", "white")
+                
+                # 移动并点击输入框
+                utils.human_move_to(tx, ty)
+                time.sleep(0.2)
+                utils.perform_human_click(tx, ty)
+                time.sleep(0.5)
+                
+                # 写入剪贴板
+                pyperclip.copy(content_to_paste)
+                
+                # 模拟 Ctrl+V (根据系统自动适配)
+                # 注意：pyautogui 在 Mac 上使用 command，在 Win 上使用 ctrl
+                ctrl_key = 'command' if os.name == 'posix' else 'ctrl'
+                pyautogui.hotkey(ctrl_key, 'v')
+                time.sleep(0.3)
+                continue
+            # === Paste 逻辑结束 ===
+
             if action == "Script":
                 target = os.path.join(config.SCRIPTS_DIR, parts[1])
                 if not os.path.exists(target):
@@ -192,7 +239,6 @@ def execute_playback(filepath):
                 
                 utils.log(f"👁️ 搜索: {os.path.basename(img)}", "yellow")
                 
-                # 调用新的智能查找逻辑
                 loc = smart_locate(img)
                 
                 if loc:
@@ -202,7 +248,7 @@ def execute_playback(filepath):
                     utils.perform_human_click(loc.x, loc.y, action == "image_double_click")
                 continue
 
-            # --- 普通指令部分保持不变 ---
+            # --- 普通指令 ---
             raw_d = float(parts[-1]) if parts[-1] else 0.1
             if raw_d < 0.3:
                 real_d = max(0.02, raw_d)

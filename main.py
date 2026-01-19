@@ -3,18 +3,19 @@ from tkinter import messagebox, simpledialog, Listbox, Scrollbar
 import threading
 import os
 import traceback
-from pynput import keyboard # 导入键盘库
+from pynput import keyboard 
 import config
 import utils
 import recorder
 import modify_eye
 import imitate
+import code_lists # 【新增】导入指令库
 
 class AutoMasterGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("AutoMaster V2.0")
-        self.root.geometry("400x350")
+        self.root.geometry("400x400") # 【修改】稍微调高一点以容纳新按钮
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
         self.is_visible = True
@@ -25,8 +26,6 @@ class AutoMasterGUI:
         self.hud_window = tk.Toplevel(self.root)
         utils.init_hud(self.hud_window)
         
-        # 【修改】使用 GlobalHotKeys 解决冲突，并支持组合键
-        # 格式：'<alt>+<f9>'
         self.hotkeys = keyboard.GlobalHotKeys({
             '<alt>+<f9>': self.start_recording_flow,
             '<alt>+<f8>': self.start_modify_flow,
@@ -58,10 +57,35 @@ class AutoMasterGUI:
         frame_btn = tk.Frame(self.root)
         frame_btn.pack(fill=tk.X, padx=10, pady=10)
         
+        # 【修改】调整按钮布局，加入指令帮助按钮
         tk.Button(frame_btn, text="刷新", command=self.refresh_list).pack(side=tk.LEFT, padx=5)
+        # 【新增】帮助按钮
+        tk.Button(frame_btn, text="📖 指令帮助", command=self.show_code_help).pack(side=tk.LEFT, padx=5)
+        
         tk.Button(frame_btn, text="删除", command=self.delete_script).pack(side=tk.RIGHT, padx=5)
 
         self.refresh_list()
+
+    # 【新增】显示指令帮助弹窗
+    def show_code_help(self):
+        help_text = code_lists.get_help_text()
+        
+        # 创建一个新窗口来显示帮助
+        help_win = tk.Toplevel(self.root)
+        help_win.title("AutoMaster 指令手册")
+        help_win.geometry("500x600")
+        
+        # 使用 Text 控件支持多行和滚动
+        txt = tk.Text(help_win, font=("Consolas", 10), padx=10, pady=10)
+        txt.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
+        
+        scroll = tk.Scrollbar(help_win, command=txt.yview)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        txt.config(yscrollcommand=scroll.set)
+        
+        # 插入文本并设置为只读
+        txt.insert(tk.END, help_text)
+        txt.config(state=tk.DISABLED)
 
     def refresh_list(self):
         self.listbox.delete(0, tk.END)
