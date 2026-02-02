@@ -3,93 +3,68 @@ import time
 import os
 import random
 import traceback
-from pynput import keyboard
-import tkinter.messagebox # 【新增】用于弹窗
+import io
+import pyperclip
+import tkinter.messagebox
 import utils
 import config
+import slider_solver
 
-def wait_for_stationary_start():
-    """
-    【新增】等待鼠标在某处静止 3 秒，作为截图的起始点（左上角）
-    """
-    utils.log("👉 请将鼠标移至目标【左上角】并静止 3秒...", "cyan")
-    
-    last_pos = pyautogui.position()
-    stable_start_time = time.time()
-    
-    while True:
-        utils.check_stop()
-        curr_pos = pyautogui.position()
-        dist = utils.get_dist(curr_pos, last_pos)
-        
-        # 如果移动了，重置计时器
-        if dist > 5: # 5像素容差
-            stable_start_time = time.time()
-            last_pos = curr_pos
-            # 只有当时间被重置时才更新UI，避免闪烁，但要保持提示
-            if time.time() % 1.0 < 0.1: 
-                utils.log("👉 请移至左上角 -> 静止 3秒", "cyan")
-        
-        # 计算静止时长
-        elapsed = time.time() - stable_start_time
-        remaining = 3.0 - elapsed
-        
-        if remaining <= 0:
-            # 静止时间达标
-            return last_pos
-        
-        time.sleep(0.1)
+# =========================================================
+# 1. 辅助功能：滑块破解
+# =========================================================
 
-def track_gesture_update(start_pos):
-    """
-    【修改】基于确定的起点，等待用户划动并静止以确认终点
-    """
-    utils.log("🟢 起点已锁定！请向右下划动框选...", "#00FF00")
-    # 播放提示音 (可选)
-    # print('\a')
+def try_solve_slider(btn_x, btn_y):
+    """ 尝试自动破解滑块验证码 """
+    utils.log("🧩 正在尝试自动破解滑块...", "cyan")
     
-    path = [start_pos]
-    moving = False
-    last_pos_time = time.time()
-    last_pos = start_pos
+    # 估算验证码背景图区域 (假设在按钮上方)
+    # 你可以根据实际情况调整 w, h 和偏移量
+    w, h = 340, 200 
+    left = max(0, btn_x - 30)
+    top = max(0, btn_y - h - 10)
     
-    while True:
-        utils.check_stop()
-        curr = pyautogui.position()
+    # 截图
+    bg_img = pyautogui.screenshot(region=(int(left), int(top), int(w), int(h)))
+    arr = io.BytesIO()
+    bg_img.save(arr, format='PNG')
+    
+    # 调用 AI 或 算法识别缺口
+    gap_x = slider_solver.get_gap_distance(arr.getvalue())
+    
+    if not gap_x:
+        utils.log("❌ 无法识别缺口位置", "red")
+        return False
+    
+    utils.log(f"🎯 缺口识别成功: {gap_x}px", "white")
+    
+    # 生成拟人化轨迹
+    tracks = slider_solver.generate_tracks(gap_x)
+    
+    # 执行拖拽
+    utils.human_move_to(btn_x, btn_y)
+    time.sleep(0.2)
+    pyautogui.mouseDown()
+    
+    for x, y, t in tracks:
+        pyautogui.moveRel(x, y, duration=t, tween=pyautogui.linear)
         
-        # 检测是否开始移动（划框）
-        if utils.get_dist(curr, start_pos) > config.MOVE_THRESHOLD:
-            moving = True
-            path.append(curr)
-            
-            # 检测是否在终点停住了 (静止 2秒 确认)
-            if utils.get_dist(curr, last_pos) < config.JITTER_TOLERANCE:
-                if time.time() - last_pos_time > 2.0:
-                    # 确认框选结束
-                    xs, ys = [p[0] for p in path], [p[1] for p in path]
-                    w, h = max(xs) - min(xs), max(ys) - min(ys)
-                    return (min(xs), min(ys), w, h)
-            else:
-                # 还在移动，更新最后位置的时间
-                last_pos_time = time.time()
-                last_pos = curr
-                
-            # 实时显示当前大小
-            curr_w = abs(curr[0] - start_pos[0])
-            curr_h = abs(curr[1] - start_pos[1])
-            utils.log(f"📐 当前区域: {curr_w}x{curr_h}", "yellow")
-            
-        time.sleep(0.05)
+    time.sleep(0.5)
+    pyautogui.mouseUp()
+    time.sleep(2.0) # 等待验证结果
+    return True
+
+# =========================================================
+# 2. 智能找图逻辑
+# =========================================================
 
 def smart_locate(img_path):
     """
-    智能找图：自动重试 -> 障碍物清除交互 -> 重新查找 -> 手势更新
+    智能找图：自动重试 -> 检查验证码 -> 人工介入 -> 更新截图
     """
     start = time.time()
-    attempt = 1
     
-    # === 阶段一：初始自动重试 (避让鼠标) ===
-    # 稍微减少这里的重试时间，因为后面有人工介入
+    # --- 阶段一：自动快速查找 (3秒) ---
     while time.time() - start < 3.0: 
         utils.check_stop()
         try:
@@ -97,164 +72,239 @@ def smart_locate(img_path):
             if loc: return loc
         except: pass
         
-        utils.log(f"⚠️ 未找到(第{attempt}次)，避让...", "orange")
-        cx, cy = pyautogui.position()
-        pyautogui.moveTo(cx + 200, cy + 200, 0.2)
-        time.sleep(1)
-        attempt += 1
+        # 快速轮询，提高响应速度
+        time.sleep(0.1) 
 
-    # === 阶段二：障碍物清除循环 ===
-    while True:
-        utils.check_stop()
-        utils.log("⏳ 请在 3秒 内帮我去除障碍物...", "magenta")
-        time.sleep(3)
-        
-        # 弹窗询问 (使用 utils.hud_instance.root 作为父窗口，避免弹窗在后面)
-        # 注意：askyesno 会阻塞线程，这正是我们需要的
-        is_cleared = tkinter.messagebox.askyesno(
-            "AutoMaster 助手", 
-            "是否移除障碍物完毕？", 
-            parent=utils.hud_instance.root
-        )
-        
-        if is_cleared: # 用户选“是”
-            utils.log("🔄 正在重新搜索图片...", "white")
-            
-            # 再次尝试查找 2 次
-            for i in range(2):
-                utils.check_stop()
+    # --- 阶段二：检查是否出现了验证码 (自动处理) ---
+    if os.path.exists(config.CAPTCHA_FOLDER):
+        for f in os.listdir(config.CAPTCHA_FOLDER):
+            if "slider" in f:
+                path = os.path.join(config.CAPTCHA_FOLDER, f)
                 try:
-                    loc = pyautogui.locateCenterOnScreen(img_path, confidence=0.8, grayscale=True)
-                    if loc: 
-                        utils.log("✅ 障碍清除后找到了！", "#00FF00")
-                        return loc
+                    loc = pyautogui.locateCenterOnScreen(path, confidence=0.8)
+                    if loc:
+                        # 发现屏幕上有滑块特征，尝试破解
+                        if try_solve_slider(loc.x, loc.y): 
+                            return None # 破解动作已执行，无需返回坐标
                 except: pass
-                time.sleep(1)
-            
-            # 如果找了2次还是没找到，跳出循环，进入阶段三（更新截图）
-            break 
-            
-        else: # 用户选“否”
-            # 继续循环提示去除障碍物
-            continue
 
-    # === 阶段三：手势更新截图 (防误触版) ===
-    utils.log("❌ 仍未找到。请告知更新范围...", "red")
-    time.sleep(1.5)
+    # --- 阶段三：人工介入 (找不到图时) ---
+    # 弹窗询问，此时脚本暂停
+    utils.log("❓ 找不到目标，请求人工介入...", "orange")
+    choice = tkinter.messagebox.askyesno(
+        "AutoMaster 助手", 
+        "未找到目标图片，是否存在障碍物？\n\n【是】我已移除障碍物，请重试\n【否】目标样式变了，请重新截图", 
+        parent=utils.hud_instance.root
+    )
     
-    # 1. 等待用户在左上角静止 3秒
-    start_pos = wait_for_stationary_start()
+    if choice: # 用户选“是” -> 重试
+        utils.log("🔄 正在重新搜索...", "white")
+        time.sleep(2)
+        try:
+            return pyautogui.locateCenterOnScreen(img_path, confidence=0.8)
+        except: pass
     
-    # 2. 开始划动轨迹
-    rect = track_gesture_update(start_pos)
-    ux, uy, uw, uh = rect
-    
-    # 3. 校验尺寸
-    if uw < 10: uw = 10
-    if uh < 10: uh = 10
-    
-    # 4. 执行修复
-    utils.log("💾 正在更新图片...", "yellow")
-    pyautogui.screenshot(region=(ux, uy, uw, uh)).save(img_path)
-    utils.log("✅ 图片已修复，继续执行", "#00FF00")
-    
-    return pyautogui.Point(ux + uw // 2, uy + uh // 2)
-
-def execute_playback(filepath):
-    if not os.path.exists(filepath): return
-    with open(filepath, "r", encoding="utf-8") as f: lines = f.readlines()
-    
-    utils.log(f"🚀 执行: {os.path.basename(filepath)}", "#00FFFF")
-    
-    is_dragging = False
-    
-    for i, line in enumerate(lines):
-        utils.check_stop()
+    else: # 用户选“否” -> 更新截图
+        utils.log("📷 进入更新模式...", "yellow")
+        import modify_eye # 动态导入，避免循环依赖
         
+        # 复用 modify_eye 的双点定界功能
+        rect = modify_eye.capture_gui(0, 0) 
+        if rect:
+            utils.log("💾 保存新截图...", "green")
+            pyautogui.screenshot(region=rect).save(img_path)
+            # 返回新截图的中心点，让脚本继续运行
+            return pyautogui.Point(rect[0] + rect[2]//2, rect[1] + rect[3]//2)
+            
+    return None
+
+# =========================================================
+# 3. 路径拟合优化 (新增)
+# =========================================================
+
+def optimize_paths(lines):
+    """
+    分析录制脚本，合并密集的 move 指令，生成稀疏的关键点。
+    这样可以让 utils.human_curl_move 发挥作用，画出平滑曲线。
+    """
+    optimized = []
+    move_buffer = []
+
+    for line in lines:
         line = line.strip()
         if not line: continue
         parts = line.split(",")
-        action = parts[0]
+        
+        # 如果是移动指令，先存起来
+        if parts[0] == "move":
+            move_buffer.append(line)
+        else:
+            # 遇到非移动指令（点击、按键等），先结算之前的移动
+            if move_buffer:
+                # 策略：只保留最后一次移动作为终点
+                # 中间的轨迹交给 utils.human_curl_move 的贝塞尔算法去生成
+                last_move = move_buffer[-1]
+                
+                # 计算这段路径的总耗时，作为移动的参考时间
+                total_delay = 0
+                for m in move_buffer:
+                    p = m.split(",")
+                    total_delay += float(p[3]) if len(p)>3 else 0.01
+                
+                # 重构 move 指令，把累加的时间放进去
+                lm_parts = last_move.split(",")
+                # move, x, y, total_delay
+                optimized.append(f"move,{lm_parts[1]},{lm_parts[2]},{total_delay}")
+                
+                move_buffer = [] # 清空缓冲
+            
+            # 添加当前非移动指令
+            optimized.append(line)
+            
+    # 处理末尾剩余的 move
+    if move_buffer:
+        last_move = move_buffer[-1]
+        lm_parts = last_move.split(",")
+        optimized.append(f"move,{lm_parts[1]},{lm_parts[2]},0.1")
+        
+    return optimized
+
+# =========================================================
+# 4. 执行主逻辑
+# =========================================================
+
+def execute_playback(filepath):
+    if not os.path.exists(filepath): return
+    
+    with open(filepath, "r", encoding="utf-8") as f: 
+        raw_lines = f.readlines()
+    
+    # 【新增】执行前先进行路径拟合优化
+    # 这会将几百行密集的 move 压缩成几十个关键点
+    lines = optimize_paths(raw_lines)
+    
+    utils.log(f"🚀 执行: {os.path.basename(filepath)} (路径已优化)", "#00FFFF")
+    
+    is_dragging = False
+    
+    for line in lines:
+        utils.check_stop()
+        line = line.strip()
+        if not line: continue
+        
+        p = line.split(",")
+        action = p[0]
         
         try:
-            if action == "Script":
-                target = os.path.join(config.SCRIPTS_DIR, parts[1])
-                if not os.path.exists(target):
-                    target = os.path.join(parts[2], parts[1])
-                utils.log(f"↪️ 子脚本: {parts[1]}", "orange")
-                execute_playback(target)
-                continue
+            # === 指令 1: Paste (自动填表) ===
+            if action == "Paste": 
+                # Paste,x,y,filepath,line_index
+                if len(p) < 5: continue
+                tx, ty, fpath, lidx = int(p[1]), int(p[2]), p[3], int(p[4])
+                
+                # 路径处理
+                real_path = os.path.join(config.SCRIPTS_DIR, fpath) if not os.path.isabs(fpath) else fpath
+                if not os.path.exists(real_path):
+                    real_path = os.path.join(config.BASE_DIR, fpath)
 
-            if action in ["image_click", "image_double_click"]:
-                img = parts[1]
-                if not os.path.exists(img):
-                    utils.log(f"❌ 图片缺失: {img}", "red"); continue
-                
-                utils.log(f"👁️ 搜索: {os.path.basename(img)}", "yellow")
-                
-                # 调用新的智能查找逻辑
-                loc = smart_locate(img)
-                
-                if loc:
-                    utils.log("✅ 锁定 -> 操作")
-                    utils.human_move_to(loc.x, loc.y)
-                    time.sleep(0.5)
-                    utils.perform_human_click(loc.x, loc.y, action == "image_double_click")
-                continue
-
-            # --- 普通指令部分保持不变 ---
-            raw_d = float(parts[-1]) if parts[-1] else 0.1
-            if raw_d < 0.3:
-                real_d = max(0.02, raw_d)
-            else:
-                real_d = max(0.1, raw_d * config.SPEED_FACTOR + random.uniform(-0.1, 0.1))
-            
-            if action == "move":
-                tx, ty = int(parts[1]), int(parts[2])
-                if is_dragging:
-                    utils.human_drag_move(tx, ty, duration=raw_d)
+                if os.path.exists(real_path):
+                    with open(real_path, 'r', encoding='utf-8') as df: 
+                        file_content = df.readlines()
+                        if 1 <= lidx <= len(file_content):
+                            content = file_content[lidx-1].strip()
+                            
+                            # 动作：移动 -> 点击 -> 粘贴
+                            utils.human_move_to(tx, ty)
+                            utils.perform_human_click(tx, ty, precise=True)
+                            pyperclip.copy(content)
+                            
+                            ctrl_key = 'command' if os.name == 'posix' else 'ctrl'
+                            pyautogui.hotkey(ctrl_key, 'v')
+                            time.sleep(0.2)
+                        else:
+                            utils.log(f"⚠️ 行号越界: {lidx}", "orange")
                 else:
-                    move_dur = max(real_d * 0.8, 0.05) if raw_d >= 0.3 else 0.02
-                    utils.human_move_to(tx, ty, move_dur)
-                    
+                    utils.log(f"❌ 文件未找到: {fpath}", "red")
+                continue
+
+            # === 指令 2: Image Click (智能找图) ===
+            if action in ["image_click", "image_double_click"]:
+                img = p[1]
+                if not os.path.exists(img): 
+                    img = os.path.join(config.IMG_FOLDER, img)
+                
+                # 调用智能找图
+                loc = smart_locate(img) 
+                if loc:
+                    utils.human_move_to(loc.x, loc.y)
+                    # 【核心修复】启用 precise=True (精准模式)
+                    # 解决勾选框点不上的问题
+                    is_double = (action == "image_double_click")
+                    utils.perform_human_click(loc.x, loc.y, is_double=is_double, precise=True)
+                continue
+
+            # === 指令 3: Script (嵌套脚本) ===
+            if action == "Script":
+                sub_script = p[1]
+                target_path = os.path.join(config.SCRIPTS_DIR, sub_script)
+                if os.path.exists(target_path):
+                    utils.log(f"↪️ 调用子脚本: {sub_script}", "cyan")
+                    execute_playback(target_path)
+                continue
+
+            # === 普通指令 (Move, Click, Key...) ===
+            
+            # 解析延迟时间
+            raw_d = float(p[-1]) if p[-1] else 0.1
+            # 计算真实延迟：应用倍速系数 + 随机微扰
+            # 注意：SPEED_FACTOR 在 main.py 里已被处理为延迟系数 (1/速度)
+            if raw_d < 0.3: 
+                real_d = max(0.02, raw_d)
+            else: 
+                real_d = max(0.1, raw_d * config.SPEED_FACTOR + random.uniform(-0.1, 0.1))
+
+            if action == "move":
+                tx, ty = int(p[1]), int(p[2])
+                if is_dragging: 
+                    # 拖拽状态下：保持线性移动，确保不松脱
+                    utils.human_drag_move(tx, ty, float(p[3]))
+                else: 
+                    # 【核心优化】非拖拽状态下：使用贝塞尔曲线顺滑移动
+                    # duration=None 让算法根据距离自动计算最自然的耗时
+                    utils.human_move_to(tx, ty, duration=None)
+
             elif action == "click_press":
-                btn = parts[3].replace("Button.", "")
-                rx, ry = int(parts[1]), int(parts[2])
+                # 记录拖拽起始点，锁定偏移
+                utils.start_drag_lock(int(p[1]), int(p[2]))
+                btn = p[3].replace("Button.","")
+                pyautogui.mouseDown(x=int(p[1]), y=int(p[2]), button=btn)
                 is_dragging = True
-                tx, ty = utils.start_drag_lock(rx, ry)
-                utils.log(f"🖱️ 按下 {btn}")
-                time.sleep(real_d)
-                pyautogui.mouseDown(x=tx, y=ty, button=btn, _pause=False)
                 
             elif action == "click_release":
-                btn = parts[3].replace("Button.", "")
-                rx, ry = int(parts[1]), int(parts[2])
-                tx, ty = utils.get_drag_pos(rx, ry)
+                btn = p[3].replace("Button.","")
+                pyautogui.mouseUp(x=int(p[1]), y=int(p[2]), button=btn)
                 is_dragging = False
-                utils.log(f"🖱️ 松开 {btn}")
-                pyautogui.mouseUp(x=tx, y=ty, button=btn, _pause=False)
                 
-            elif action == "scroll":
-                scroll_amount = int(parts[4])
-                utils.log(f"📜 滚动 {scroll_amount}")
-                pyautogui.scroll(scroll_amount * 100)
-                time.sleep(real_d)
+            elif action == "key_press": 
+                pyautogui.keyDown(p[1])
                 
-            elif action == "key_press":
-                k = parts[1].replace("'", "")
-                utils.log(f"⌨️ 按键: {k}")
-                if k != 'None': pyautogui.keyDown(k)
-                time.sleep(real_d)
+            elif action == "key_release": 
+                pyautogui.keyUp(p[1])
                 
-            elif action == "key_release":
-                k = parts[1].replace("'", "")
-                if k != 'None': pyautogui.keyUp(k)
-        
+            elif action == "scroll": 
+                # 滚轮幅度放大 100 倍
+                pyautogui.scroll(int(p[4])*100)
+            
+            # 只有非移动指令才执行显式等待
+            # 因为 move 指令在 human_move_to 内部已经消耗了时间
+            if action != "move":
+                time.sleep(real_d) 
+
         except Exception as e:
             traceback.print_exc()
-            utils.log(f"⚠️ 异常: {e}", "red")
-
-    utils.log(f"✅ 执行结束", "#00FF00")
+            utils.log(f"⚠️ 执行出错: {e}", "red")
+            
+    utils.log("✅ 执行结束", "#00FF00")
 
 def run(filepath):
     config.STOP_EVENT.clear() 

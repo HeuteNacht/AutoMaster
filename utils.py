@@ -3,6 +3,7 @@ import random
 import time
 import math
 import pyautogui
+# import numpy as np # 不需要 numpy
 import config
 
 hud_instance = None
@@ -40,17 +41,15 @@ def check_stop():
     if config.STOP_EVENT.is_set():
         raise InterruptedError("用户强制停止")
 
-# === 拟人化算法核心 ===
+# =========================================================
+# 拟人化核心算法
+# =========================================================
+
 last_raw_x, last_raw_y = -1, -1
 current_offset_x, current_offset_y = 0, 0
-MOVE_TWEEN = pyautogui.easeInOutQuad
-
-# 【新增】全局变量，用于记录拖拽开始时的固定偏移
-drag_lock_offset_x = 0
-drag_lock_offset_y = 0
+drag_lock_offset_x, drag_lock_offset_y = 0, 0
 
 def get_stable_random_pos(raw_x, raw_y):
-    """普通移动/点击的随机坐标生成"""
     global last_raw_x, last_raw_y, current_offset_x, current_offset_y
     if raw_x == last_raw_x and raw_y == last_raw_y: pass
     else:
@@ -60,46 +59,114 @@ def get_stable_random_pos(raw_x, raw_y):
     return raw_x + current_offset_x, raw_y + current_offset_y
 
 def start_drag_lock(raw_x, raw_y):
-    """【新增】开始拖拽：生成并锁定一个偏移量"""
     global drag_lock_offset_x, drag_lock_offset_y
-    # 生成一个新的随机偏移，并在整个拖拽过程中复用它
     drag_lock_offset_x = random.randint(-config.PIXEL_VARIANCE, config.PIXEL_VARIANCE)
     drag_lock_offset_y = random.randint(-config.PIXEL_VARIANCE, config.PIXEL_VARIANCE)
     return raw_x + drag_lock_offset_x, raw_y + drag_lock_offset_y
 
 def get_drag_pos(raw_x, raw_y):
-    """【新增】获取拖拽过程中的坐标（使用锁定的偏移）"""
     return raw_x + drag_lock_offset_x, raw_y + drag_lock_offset_y
 
-def human_move_to(x, y, duration=None):
-    """普通悬停移动（带缓动）"""
-    check_stop()
+# --- 贝塞尔曲线算法 ---
+def calculate_bezier_point(t, p0, p1, p2, p3):
+    u = 1 - t
+    tt = t * t
+    uu = u * u
+    uuu = uu * u
+    ttt = tt * t
+    res = (uuu * p0) + (3 * uu * t * p1) + (3 * u * tt * p2) + (ttt * p3)
+    return res
+
+# --- 【关键修复】独立的直线移动函数 ---
+def human_move_to_linear(x, y, duration=None):
+    """ 
+    专门用于短距离移动。
+    它直接调用 pyautogui，绝不回调其他逻辑，从而切断死循环。
+    """
     tx, ty = get_stable_random_pos(x, y)
+    if duration is None: duration = 0.1
+    # 强制使用线性移动
+    pyautogui.moveTo(tx, ty, duration=duration, tween=pyautogui.linear)
+
+def human_curl_move(target_x, target_y, duration=None):
+    """ 智能顺滑移动 """
+    check_stop()
+    start_x, start_y = pyautogui.position()
+    dist = math.hypot(target_x - start_x, target_y - start_y)
+    
+    # 【核心修复点】
+    # 之前这里错误地调用了 human_move_to，导致死循环。
+    # 现在改为调用 human_move_to_linear。
+    if dist < 50:
+        human_move_to_linear(target_x, target_y, duration) 
+        return
+
+    if duration is None:
+        duration = 0.3 + (dist / 1500.0) 
+    
+    # 随机控制点
+    control_1_x = start_x + (target_x - start_x) * 0.3 + random.randint(-80, 80)
+    control_1_y = start_y + (target_y - start_y) * 0.3 + random.randint(-80, 80)
+    control_2_x = start_x + (target_x - start_x) * 0.7 + random.randint(-80, 80)
+    control_2_y = start_y + (target_y - start_y) * 0.7 + random.randint(-80, 80)
+
+    fps = 60
+    steps = int(max(15, duration * fps))
+    
+    start_time = time.time()
+    
+    for i in range(steps + 1):
+        check_stop()
+        t = i / steps
+        next_x = calculate_bezier_point(t, start_x, control_1_x, control_2_x, target_x)
+        next_y = calculate_bezier_point(t, start_y, control_1_y, control_2_y, target_y)
+        
+        try:
+            pyautogui.platformModule._moveTo(int(next_x), int(next_y))
+        except:
+            pyautogui.moveTo(int(next_x), int(next_y))
+        
+        expected_time = (i / steps) * duration
+        elapsed = time.time() - start_time
+        if elapsed < expected_time:
+            time.sleep(expected_time - elapsed)
+
+def human_move_to(x, y, duration=None):
+    """ 统一入口 """
+    tx, ty = get_stable_random_pos(x, y)
+    
     if duration is None:
         curr_x, curr_y = pyautogui.position()
         dist = ((tx-curr_x)**2 + (ty-curr_y)**2)**0.5
         duration = 0.15 + (dist / 2000.0) 
-    rand_dur = max(0.1, duration + random.uniform(-0.05, 0.05))
-    pyautogui.moveTo(tx, ty, duration=rand_dur, tween=MOVE_TWEEN)
+    
+    real_dur = max(0.1, duration / config.SPEED_FACTOR) 
+    
+    # 这里调用曲线移动，如果距离近，human_curl_move 内部会转交给 linear
+    human_curl_move(tx, ty, real_dur)
 
 def human_drag_move(x, y, duration):
-    """【新增】拖拽时的移动（线性，无新随机，无缓动）"""
     check_stop()
-    # 使用锁定的偏移量，保证轨迹平行于录制轨迹
     tx, ty = get_drag_pos(x, y)
-    # 强制线性移动，防止缓动造成拖拽迟滞
     pyautogui.moveTo(tx, ty, duration=duration, tween=pyautogui.linear)
 
-def perform_human_click(x, y, is_double=False, button='left'):
+def perform_human_click(x, y, is_double=False, button='left', precise=False):
     check_stop()
-    tx, ty = get_stable_random_pos(x, y)
+    if precise:
+        tx, ty = x, y
+        hold_time = 0.15 
+    else:
+        tx, ty = get_stable_random_pos(x, y)
+        hold_time = random.uniform(0.08, 0.15)
+        
     pyautogui.mouseDown(x=tx, y=ty, button=button)
-    time.sleep(random.uniform(0.08, 0.15))
+    time.sleep(hold_time)
     pyautogui.mouseUp(x=tx, y=ty, button=button)
+    
     if is_double:
         time.sleep(random.uniform(0.05, 0.12))
         pyautogui.mouseDown(x=tx, y=ty, button=button)
-        time.sleep(random.uniform(0.08, 0.15))
+        time.sleep(hold_time)
         pyautogui.mouseUp(x=tx, y=ty, button=button)
 
 def get_dist(p1, p2):
