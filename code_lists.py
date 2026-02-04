@@ -39,6 +39,10 @@ COMMANDS = {
     "Paste": {
         "format": "Paste,x,y,filename,line_index",
         "desc": "自动填表：读取文件第N行，点击坐标并粘贴"
+    },
+    "type_file": {
+        "format": "type_file,filepath,interval,enter_flag",
+        "desc": "读取文件内容并模拟打字(支持中文), enter_flag为1表示最后按回车"
     }
 }
 

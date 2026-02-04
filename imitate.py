@@ -290,7 +290,42 @@ def execute_playback(filepath):
                 
             elif action == "key_release": 
                 pyautogui.keyUp(p[1])
+
+# -------------------------------------------------
+            # 新增指令：从文件读取字符串并模拟键盘打字
+            # 格式：type_file, C:\data.txt, 0.05, 1
+            # -------------------------------------------------
+            elif action == "type_file":
+                file_to_read = p[1]
+                char_interval = float(p[2]) if len(p) > 2 else 0.05
+                press_enter = (p[3] == "1") if len(p) > 3 else False
                 
+                if os.path.exists(file_to_read):
+                    try:
+                        with open(file_to_read, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                        
+                        utils.log(f"⌨️ 正在输入文件内容: {os.path.basename(file_to_read)}", "cyan")
+                        
+                        # 使用 write 方法模拟打字，interval 实现拟人化间隔
+                        # 注意：pyautogui.write 不支持中文，如果含中文需使用 pyperclip
+                        if any(ord(c) > 127 for c in content):
+                            # 含中文逻辑：拷贝到剪贴板并粘贴
+                            pyperclip.copy(content)
+                            pyautogui.hotkey('ctrl', 'v')
+                        else:
+                            # 纯英文逻辑：模拟按键
+                            pyautogui.write(content, interval=char_interval)
+                        
+                        if press_enter:
+                            pyautogui.press('enter')
+                            
+                    except Exception as fe:
+                        utils.log(f"❌ 读取输入文件失败: {fe}", "red")
+                else:
+                    utils.log(f"⚠️ 输入文件不存在: {file_to_read}", "orange")
+# -------------------------------------------------
+
             elif action == "scroll": 
                 # 滚轮幅度放大 100 倍
                 pyautogui.scroll(int(p[4])*100)
